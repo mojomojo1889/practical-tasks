@@ -60,6 +60,7 @@ class TaskIn(BaseModel):
     category: str = Field(default="other", max_length=80)
     category_key: str | None = Field(default=None, max_length=30)
     custom_category: str | None = Field(default=None, max_length=80)
+    priority: str = Field(default="normal", max_length=20)
     description: str = Field(default="", max_length=10000)
     location: str = Field(default="", max_length=160)
     room: str = Field(default="", max_length=80)
@@ -69,12 +70,19 @@ class TaskIn(BaseModel):
     is_open: bool = True
     academic_group_id: int | None = None
 
-    @field_validator("title", "category", "category_key", "custom_category", "location", "room")
+    @field_validator("title", "category", "category_key", "custom_category", "location", "room", "priority")
     @classmethod
     def strip_text(cls, v):
         if v is None:
             return v
         return v.strip()
+
+    @field_validator("priority")
+    @classmethod
+    def validate_priority(cls, value):
+        if value not in {"urgent", "important", "normal"}:
+            raise ValueError("priority must be urgent, important, or normal")
+        return value
 
 
 class TaskOut(TaskIn):

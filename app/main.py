@@ -11,7 +11,7 @@ from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, Up
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, UnidentifiedImageError
-from sqlalchemy import delete, func, inspect, select, text, update
+from sqlalchemy import case, delete, func, inspect, select, text, update
 from sqlalchemy.orm import Session, selectinload
 
 from .auth import DUMMY, admin, create_session, csrf, current_session, current_user, hash_password, rate_limit, teacher, verify_password
@@ -26,6 +26,7 @@ settings.upload_dir.mkdir(parents=True, exist_ok=True)
 Image.MAX_IMAGE_PIXELS = 25_000_000
 
 STANDARD_CATEGORIES = {"cable", "classroom", "server", "network", "hardware", "other"}
+TASK_PRIORITIES = {"urgent", "important", "normal"}
 LEGACY_GROUP_NAME = "Imported legacy data"
 
 
@@ -93,6 +94,7 @@ def task_dict(task: Task):
         "category": task.category,
         "category_key": task.category_key,
         "custom_category": task.custom_category,
+        "priority": task.priority or "normal",
         "description": task.description,
         "location": task.location,
         "room": task.room,
@@ -145,6 +147,8 @@ def migrate_database():
                 conn.execute(text("ALTER TABLE tasks ADD COLUMN category_key TEXT NOT NULL DEFAULT 'other'"))
             if not column_exists(conn, "tasks", "custom_category"):
                 conn.execute(text("ALTER TABLE tasks ADD COLUMN custom_category TEXT"))
+            if not column_exists(conn, "tasks", "priority"):
+                conn.execute(text("ALTER TABLE tasks ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal'"))
         with SessionLocal() as db:
             existing_version = db.scalar(select(MigrationVersion).where(MigrationVersion.version == "groups-admin-migration"))
             if existing_version is None:
@@ -192,6 +196,8 @@ def migrate_database():
                 else:
                     task.category = task.category_key
                     task.custom_category = None
+                if task.priority not in TASK_PRIORITIES:
+                    task.priority = "normal"
             db.commit()
 
 
@@ -261,7 +267,10 @@ def me(s: LoginSession = Depends(current_session)):
 
 @app.get("/api/tasks")
 def tasks(user: User = Depends(current_user), db: Session = Depends(get_db)):
-    query = select(Task).options(selectinload(Task.enrollments)).where(Task.is_archived.is_(False)).order_by(Task.scheduled_at.is_(None), Task.scheduled_at, Task.created_at.desc())
+    priority_order = case((Task.priority == "urgent", 0), (Task.priority == "important", 1), else_=2)
+    query = select(Task).options(selectinload(Task.enrollments)).where(Task.is_archived.is_(False)).order_by(
+        priority_order, Task.due_at.is_(None), Task.due_at, Task.scheduled_at.is_(None), Task.scheduled_at, Task.created_at.desc()
+    )
     if user.role == "student":
         allowed_groups = get_user_group_ids(db, user)
         if not allowed_groups:
@@ -310,6 +319,7 @@ def create_task(data: TaskIn, user: User = Depends(teacher), _: LoginSession = D
         category="other" if category_key == "other" else category_key,
         category_key=category_key,
         custom_category=custom_category,
+        priority=data.priority,
         description=data.description,
         location=data.location,
         room=data.room,
@@ -345,11 +355,14 @@ def update_task(task_id: int, data: TaskIn, user: User = Depends(teacher), _: Lo
         if user.role != "admin" and target_group_id not in get_user_group_ids(db, user):
             raise HTTPException(403, "Group access denied")
     category_key, custom_category = normalize_category(data)
+    if data.priority not in TASK_PRIORITIES:
+        raise HTTPException(422, "Invalid priority")
     for key, value in {
         "title": data.title.strip(),
         "category": "other" if category_key == "other" else category_key,
         "category_key": category_key,
         "custom_category": custom_category,
+        "priority": data.priority,
         "description": data.description,
         "location": data.location,
         "room": data.room,

@@ -107,6 +107,7 @@ class Task(Base):
     category: Mapped[str] = mapped_column(String(80), default="other")
     category_key: Mapped[str] = mapped_column(String(30), default="other", index=True)
     custom_category: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    priority: Mapped[str] = mapped_column(String(20), default="normal", index=True)
     description: Mapped[str] = mapped_column(Text, default="")
     location: Mapped[str] = mapped_column(String(160), default="")
     room: Mapped[str] = mapped_column(String(80), default="")
