@@ -337,6 +337,13 @@ def update_task(task_id: int, data: TaskIn, user: User = Depends(teacher), _: Lo
     if user.role != "admin":
         if task.academic_group_id not in get_user_group_ids(db, user):
             raise HTTPException(403, "Group access denied")
+    target_group_id = data.academic_group_id if data.academic_group_id is not None else task.academic_group_id
+    if target_group_id is not None:
+        target_group = db.get(AcademicGroup, target_group_id)
+        if not target_group or not target_group.is_active:
+            raise HTTPException(422, "Group not found or inactive")
+        if user.role != "admin" and target_group_id not in get_user_group_ids(db, user):
+            raise HTTPException(403, "Group access denied")
     category_key, custom_category = normalize_category(data)
     for key, value in {
         "title": data.title.strip(),
@@ -350,7 +357,7 @@ def update_task(task_id: int, data: TaskIn, user: User = Depends(teacher), _: Lo
         "due_at": data.due_at,
         "capacity": data.capacity,
         "is_open": data.is_open,
-        "academic_group_id": data.academic_group_id if data.academic_group_id is not None else task.academic_group_id,
+        "academic_group_id": target_group_id,
     }.items():
         setattr(task, key, value)
     db.commit()
@@ -840,6 +847,28 @@ def add_group_teacher(group_id: int, data: GroupTeacherIn, _u: User = Depends(ad
         db.add(GroupTeacher(group_id=group_id, teacher_id=data.teacher_id, permission=permission))
     db.commit()
     return {"ok": True}
+
+
+@app.get("/api/admin/groups/{group_id}/teachers")
+def list_group_teachers(group_id: int, _u: User = Depends(admin), db: Session = Depends(get_db)):
+    if not db.get(AcademicGroup, group_id):
+        raise HTTPException(404, "Group not found")
+    rows = db.scalars(
+        select(GroupTeacher)
+        .options(selectinload(GroupTeacher.teacher))
+        .where(GroupTeacher.group_id == group_id)
+        .order_by(GroupTeacher.created_at)
+    ).all()
+    return [
+        {
+            "id": row.id,
+            "teacher_id": row.teacher_id,
+            "name": row.teacher.name,
+            "email": row.teacher.email,
+            "permission": row.permission,
+        }
+        for row in rows
+    ]
 
 
 @app.delete("/api/admin/groups/{group_id}/teachers/{teacher_id}")
