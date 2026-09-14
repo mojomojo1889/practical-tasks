@@ -1,0 +1,32 @@
+# env-файлы с паролями
+.env
+*.env
+
+# SQLite-базы и бэкапы
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+backup/
+backups/
+
+# Загрузки пользователей (фотографии и т.п.)
+uploads/
+media/
+
+# Docker артефакты
+*.log
+*.pid
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
