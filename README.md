@@ -225,23 +225,114 @@ ping tasks.<домен-университета>
 5. Нажмите «Отправить на подтверждение».
 6. После подтверждения преподавателя работа переместится в историю выполненных.
 
-## Обновление
+## Безопасное обновление без потери данных
 
-Перед обновлением сделайте резервную копию:
+Ниже — рекомендуемый порядок обновления проекта на работающем сервере без потери текущей базы SQLite и загруженных фотографий.
+
+### 1. Сделайте резервную копию базы и файлов
 
 ```bash
 cd /opt/practical-tasks
 sudo ./scripts/backup.sh
+ls -lh backups/
 ```
 
-Замените исходники новой версией, **не заменяя `.env`**, затем:
+Скрипт создаёт архив вида `backups/practical-tasks_YYYY-MM-DD_HH-MM-SS.tar.gz` с:
+- Базой SQLite из `/data/app.db`
+- Папкой фотографий `/data/uploads`
+
+Сохраните этот архив на отдельный носитель или другой сервер. Копия на том же диске не защищает от сбоя диска.
+
+### 2. Проверьте, что `.env` не будет перезаписан
+
+Перед обновлением убедитесь, что файл `.env` в `/opt/practical-tasks` есть и содержит актуальные значения:
 
 ```bash
-sudo docker compose build --pull
-sudo docker compose up -d
-sudo docker compose ps
-sudo docker compose logs --tail=100
+sudo ls -l .env
+sudo grep -E 'ADMIN_|COOKIE_SECURE|INVITE_CODE' .env
 ```
+
+Важно: при обновлении заменяйте только код проекта, а `.env` оставляйте как есть. В нём хранится пароль администратора, invite code и другие настройки.
+
+### 3. Обновите код проекта
+
+Подключитесь к серверу и обновите исходники новой версией:
+
+```bash
+cd /opt/practical-tasks
+sudo git pull --ff-only
+# или распакуйте новый релиз поверх текущего каталога
+```
+
+Если релиз выкладывается архивом, распакуйте его в `/opt/practical-tasks`, но не удаляйте `.env`, `backups/` и том Docker `appdata`.
+
+### 4. Сборка и запуск без пересоздания базы
+
+Запуск обновлённого контейнера должен использовать тот же Docker volume `appdata`, поэтому база не удаляется:
+
+```bash
+cd /opt/practical-tasks
+sudo docker compose config
+sudo docker compose build --pull
+sudo docker compose up -d --no-deps app
+sudo docker compose ps
+sudo docker compose logs --tail=200 app
+```
+
+Если приложение сообщает об ошибках миграции или запуска, не удаляйте volume `appdata` вручную. Сначала проверьте логи и откатите код.
+
+### 5. Проверка после обновления
+
+```bash
+curl http://127.0.0.1/health
+sudo docker compose logs --tail=200 app
+```
+
+Проверьте, что:
+- приложение отвечает на `/health`;
+- все пользователи и задачи ещё видны в интерфейсе;
+- добавленные фотографии доступны;
+- админ-пароль и invite code в `.env` остаются прежними.
+
+### 6. Если обновление прошло с ошибкой — откат
+
+Откат выполняется безопасно:
+
+```bash
+cd /opt/practical-tasks
+sudo docker compose down
+sudo git checkout <предыдущий-рабочий-коммит>
+# или восстановите предыдущую версию файлов
+sudo docker compose up -d
+```
+
+Если проблема в миграции, восстановите базу из резервной копии:
+
+```bash
+cd /opt/practical-tasks
+sudo mkdir -p /tmp/practical-restore
+sudo tar -xzf backups/practical-tasks_ДАТА.tar.gz -C /tmp/practical-restore
+sudo docker compose down
+sudo docker volume ls
+sudo docker run --rm -v practical-tasks_appdata:/data -v /tmp/practical-restore:/restore alpine sh -c 'cp -f /restore/app_*.db /data/app.db && cp -a /restore/uploads_* /data/uploads'
+sudo docker compose up -d
+```
+
+Для обычного сервера обычно достаточно сделать резервную копию и не трогать `.env` и Docker volume. Это сохранит текущую БД и файлы загрузок.
+
+### 7. Рекомендация по автоматическому бэкапу
+
+```bash
+sudo crontab -e
+```
+
+Добавьте:
+
+```cron
+15 2 * * * cd /opt/practical-tasks && ./scripts/backup.sh >> /var/log/practical-tasks-backup.log 2>&1
+```
+
+Это позволяет делать бэкапы каждую ночь без остановки работы.
 
 ## Резервное копирование
 

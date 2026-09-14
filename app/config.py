@@ -9,8 +9,8 @@ class Settings(BaseSettings):
     cookie_secure: bool = False
     invite_code: str = "CHANGE-ME"
     admin_name: str = "Teacher"
-    admin_email: str = "teacher@example.invalid"
-    admin_password: str = "CHANGE-ME-NOW"
+    admin_email: str = "teacher@example.fi"
+    admin_password: str = "AdminPass123!"
     max_photo_mb: int = 5
     max_photos: int = 5
     seed_demo: bool = False
