@@ -224,7 +224,6 @@ def register(data: RegisterIn, db: Session = Depends(get_db)):
         email=email,
         password_hash=hash_password(data.password),
         role=requested_role,
-        group_name=(data.group_name or "").strip() or None,
         active=True,
         teacher_approved=(requested_role == "student"),
         must_change_password=False,
@@ -438,6 +437,14 @@ def assign(task_id: int, data: AssignIn, user: User = Depends(teacher), _: Login
         raise HTTPException(404, "Student not found")
     if user.role != "admin" and task.academic_group_id not in get_user_group_ids(db, user):
         raise HTTPException(403, "Group access denied")
+    if user.role != "admin":
+        active_membership = db.scalar(select(GroupMembership).where(
+            GroupMembership.group_id == task.academic_group_id,
+            GroupMembership.user_id == student.id,
+            GroupMembership.status == "active",
+        ))
+        if not active_membership:
+            raise HTTPException(403, "Student is not in this group")
     if db.scalar(select(Enrollment).where(Enrollment.task_id == task_id, Enrollment.student_id == student.id)):
         raise HTTPException(409, "Already assigned")
     e = Enrollment(task_id=task_id, student_id=student.id)
@@ -502,7 +509,7 @@ async def upload_photos(eid: int, files: list[UploadFile] = File(...), user: Use
     e = db.scalar(select(Enrollment).options(selectinload(Enrollment.photos), selectinload(Enrollment.task)).where(Enrollment.id == eid))
     if not e or (user.role not in {"teacher", "admin"} and e.student_id != user.id):
         raise HTTPException(404, "Work not found")
-    if user.role == "teacher" and user.teacher_approved and e.task.academic_group_id not in get_user_group_ids(db, user):
+    if user.role == "teacher" and e.task.academic_group_id not in get_user_group_ids(db, user):
         raise HTTPException(403, "Group access denied")
     if e.status == "completed":
         raise HTTPException(409, "Completed work is locked")
@@ -546,7 +553,7 @@ def delete_photo(photo_id: int, user: User = Depends(current_user), _: LoginSess
     p = db.scalar(select(Attachment).options(selectinload(Attachment.enrollment).selectinload(Enrollment.task)).where(Attachment.id == photo_id))
     if not p or (user.role not in {"teacher", "admin"} and p.enrollment.student_id != user.id):
         raise HTTPException(404, "Photo not found")
-    if user.role == "teacher" and user.teacher_approved and p.enrollment.task.academic_group_id not in get_user_group_ids(db, user):
+    if user.role == "teacher" and p.enrollment.task.academic_group_id not in get_user_group_ids(db, user):
         raise HTTPException(403, "Group access denied")
     if p.enrollment.status == "completed":
         raise HTTPException(409, "Completed work is locked")
@@ -561,7 +568,7 @@ def photo(photo_id: int, user: User = Depends(current_user), db: Session = Depen
     p = db.scalar(select(Attachment).options(selectinload(Attachment.enrollment).selectinload(Enrollment.task)).where(Attachment.id == photo_id))
     if not p or (user.role not in {"teacher", "admin"} and p.enrollment.student_id != user.id):
         raise HTTPException(404, "Photo not found")
-    if user.role == "teacher" and user.teacher_approved and p.enrollment.task.academic_group_id not in get_user_group_ids(db, user):
+    if user.role == "teacher" and p.enrollment.task.academic_group_id not in get_user_group_ids(db, user):
         raise HTTPException(403, "Group access denied")
     path = settings.upload_dir / p.stored_name
     if not path.is_file():
@@ -622,7 +629,10 @@ def students(user: User = Depends(teacher), db: Session = Depends(get_db)):
         ).all()
     out = []
     for u in users:
-        counts = dict(db.execute(select(Enrollment.status, func.count()).where(Enrollment.student_id == u.id).group_by(Enrollment.status)).all())
+        count_query = select(Enrollment.status, func.count()).where(Enrollment.student_id == u.id)
+        if user.role != "admin":
+            count_query = count_query.join(Task, Task.id == Enrollment.task_id).where(Task.academic_group_id.in_(list(allowed)))
+        counts = dict(db.execute(count_query.group_by(Enrollment.status)).all())
         out.append({**UserOut.model_validate(u).model_dump(), "counts": counts})
     return out
 
@@ -630,6 +640,48 @@ def students(user: User = Depends(teacher), db: Session = Depends(get_db)):
 @app.get("/api/admin/users")
 def admin_users(_u: User = Depends(admin), db: Session = Depends(get_db)):
     return [UserOut.model_validate(u).model_dump() for u in db.scalars(select(User).order_by(User.created_at.desc())).all()]
+
+
+@app.delete("/api/admin/users/{user_id}", status_code=204)
+def delete_user(user_id: int, actor: User = Depends(admin), _: LoginSession = Depends(csrf), db: Session = Depends(get_db)):
+    user = db.scalar(select(User).where(User.id == user_id))
+    if not user:
+        raise HTTPException(404, "User not found")
+    if user.id == actor.id:
+        raise HTTPException(409, "You cannot delete your own account")
+    admin_count = db.scalar(select(func.count()).select_from(User).where(User.role == "admin"))
+    if user.role == "admin" and admin_count <= 1:
+        raise HTTPException(409, "Cannot delete the last admin")
+
+    enrollments = db.scalars(
+        select(Enrollment).options(selectinload(Enrollment.photos)).where(Enrollment.student_id == user.id)
+    ).all()
+    for enrollment in enrollments:
+        for photo_file in enrollment.photos:
+            try:
+                (settings.upload_dir / photo_file.stored_name).unlink()
+            except FileNotFoundError:
+                pass
+        db.delete(enrollment)
+
+    tasks = db.scalars(
+        select(Task).options(selectinload(Task.enrollments).selectinload(Enrollment.photos)).where(Task.teacher_id == user.id)
+    ).all()
+    for task in tasks:
+        for enrollment in task.enrollments:
+            for photo_file in enrollment.photos:
+                try:
+                    (settings.upload_dir / photo_file.stored_name).unlink()
+                except FileNotFoundError:
+                    pass
+        db.delete(task)
+
+    db.execute(update(AuditLog).where(AuditLog.actor_id == user.id).values(actor_id=None))
+    db.execute(update(RoleRequest).where(RoleRequest.reviewer_id == user.id).values(reviewer_id=None))
+    db.execute(update(Enrollment).where(Enrollment.completed_by == user.id).values(completed_by=None))
+    log_audit(db, actor.id, "delete_user", "user", user.id, {"name": user.name, "email": user.email, "role": user.role})
+    db.delete(user)
+    db.commit()
 
 
 @app.patch("/api/admin/users/{user_id}")
@@ -803,6 +855,8 @@ def delete_group(group_id: int, actor: User = Depends(admin), _: LoginSession = 
 def join_group(data: GroupJoinIn, user: User = Depends(current_user), _: LoginSession = Depends(csrf), db: Session = Depends(get_db)):
     if user.role != "student":
         raise HTTPException(403, "Student access required")
+    if db.scalar(select(GroupMembership).where(GroupMembership.user_id == user.id, GroupMembership.status == "active")):
+        raise HTTPException(409, "Student already belongs to a group")
     code_hash = hashlib.sha256(data.join_code.strip().encode()).hexdigest()
     group = db.scalar(select(AcademicGroup).where(AcademicGroup.join_code_hash == code_hash, AcademicGroup.is_active.is_(True)))
     if not group:

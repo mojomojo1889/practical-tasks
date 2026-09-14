@@ -11,8 +11,6 @@ class RegisterIn(BaseModel):
     password: str = Field(min_length=10, max_length=128)
     role: str | None = Field(default=None, max_length=20)
     requested_role: str | None = Field(default=None, max_length=20)
-    group_name: str | None = Field(default=None, max_length=80)
-    invite_code: str | None = Field(default=None, min_length=1, max_length=100)
 
     @field_validator("role", "requested_role", mode="before")
     @classmethod
