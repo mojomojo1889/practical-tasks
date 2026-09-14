@@ -880,10 +880,75 @@ def remove_group_student(group_id: int, user_id: int, _u: User = Depends(admin),
     return {"ok": True}
 
 
+@app.get("/api/admin/groups/{group_id}/members")
+def group_members(group_id: int, _u: User = Depends(admin), db: Session = Depends(get_db)):
+    if not db.get(AcademicGroup, group_id):
+        raise HTTPException(404, "Group not found")
+    rows = db.scalars(
+        select(GroupMembership)
+        .options(selectinload(GroupMembership.user))
+        .where(GroupMembership.group_id == group_id)
+        .order_by(GroupMembership.status, GroupMembership.created_at)
+    ).all()
+    return [
+        {
+            "id": row.id,
+            "user_id": row.user_id,
+            "name": row.user.name,
+            "email": row.user.email,
+            "status": row.status,
+            "created_at": row.created_at,
+        }
+        for row in rows
+    ]
+
+
+@app.patch("/api/admin/groups/{group_id}/members/{membership_id}")
+def update_group_membership(
+    group_id: int,
+    membership_id: int,
+    data: GroupStudentIn,
+    actor: User = Depends(admin),
+    _: LoginSession = Depends(csrf),
+    db: Session = Depends(get_db),
+):
+    row = db.scalar(
+        select(GroupMembership).where(
+            GroupMembership.id == membership_id,
+            GroupMembership.group_id == group_id,
+        )
+    )
+    if not row:
+        raise HTTPException(404, "Membership not found")
+    status_value = data.status.strip().lower()
+    if status_value not in {"pending", "active", "removed"}:
+        raise HTTPException(422, "Invalid status")
+    row.status = status_value
+    log_audit(db, actor.id, "update_group_membership", "group_membership", row.id, {"status": status_value})
+    db.commit()
+    return {"id": row.id, "status": row.status}
+
+
 @app.get("/api/admin/groups")
 def admin_groups(_u: User = Depends(admin), db: Session = Depends(get_db)):
-    rows = db.scalars(select(AcademicGroup).order_by(AcademicGroup.name)).all()
-    return [{"id": g.id, "name": g.name, "description": g.description, "is_active": g.is_active, "has_join_code": bool(g.join_code_hash)} for g in rows]
+    rows = db.scalars(
+        select(AcademicGroup)
+        .options(selectinload(AcademicGroup.memberships), selectinload(AcademicGroup.teachers))
+        .order_by(AcademicGroup.name)
+    ).all()
+    return [
+        {
+            "id": g.id,
+            "name": g.name,
+            "description": g.description,
+            "is_active": g.is_active,
+            "has_join_code": bool(g.join_code_hash),
+            "member_count": sum(m.status == "active" for m in g.memberships),
+            "pending_count": sum(m.status == "pending" for m in g.memberships),
+            "teacher_count": len(g.teachers),
+        }
+        for g in rows
+    ]
 
 
 @app.get("/api/admin/audit-log")
