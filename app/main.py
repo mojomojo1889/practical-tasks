@@ -392,6 +392,21 @@ def archive_task(task_id: int, user: User = Depends(teacher), _: LoginSession = 
     return {"ok": True}
 
 
+@app.delete("/api/tasks/{task_id}", status_code=204)
+def delete_task(task_id: int, user: User = Depends(teacher), _: LoginSession = Depends(csrf), db: Session = Depends(get_db)):
+    task = db.scalar(select(Task).options(selectinload(Task.enrollments).selectinload(Enrollment.photos)).where(Task.id == task_id))
+    if not task:
+        raise HTTPException(404, "Task not found")
+    if user.role != "admin" and task.academic_group_id not in get_user_group_ids(db, user):
+        raise HTTPException(403, "Group access denied")
+    for enrollment in task.enrollments:
+        for photo in enrollment.photos:
+            (settings.upload_dir / photo.stored_name).unlink(missing_ok=True)
+    log_audit(db, user.id, "delete_task", "task", task.id, {"title": task.title})
+    db.delete(task)
+    db.commit()
+
+
 @app.post("/api/tasks/{task_id}/enroll", status_code=201)
 def enroll(task_id: int, user: User = Depends(current_user), _: LoginSession = Depends(csrf), db: Session = Depends(get_db)):
     if user.role != "student":
@@ -770,6 +785,18 @@ def reactivate_group(group_id: int, _u: User = Depends(admin), _: LoginSession =
     group.is_active = True
     db.commit()
     return {"ok": True}
+
+
+@app.delete("/api/groups/{group_id}", status_code=204)
+def delete_group(group_id: int, actor: User = Depends(admin), _: LoginSession = Depends(csrf), db: Session = Depends(get_db)):
+    group = db.scalar(select(AcademicGroup).options(selectinload(AcademicGroup.tasks)).where(AcademicGroup.id == group_id))
+    if not group:
+        raise HTTPException(404, "Group not found")
+    if group.tasks:
+        raise HTTPException(409, "Move or delete the group's tasks before deleting the group")
+    log_audit(db, actor.id, "delete_group", "academic_group", group.id, {"name": group.name})
+    db.delete(group)
+    db.commit()
 
 
 @app.post("/api/groups/join")
